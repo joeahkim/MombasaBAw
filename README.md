@@ -1,35 +1,40 @@
 ### Requirements
 
 - Python 3.8 or higher
-- Google Chrome browser (latest or recent version)
+- Google Chrome browser
 - Internet connection
 
 ---
 
-### Installation & Setup (Step by Step)
+### Installation & Setup
 
 #### 1. Clone the repository
 ```bash
 git clone https://github.com/joeahkim/MombasaBAw.git
 cd MombasaBAw
 ```
-### 2. Create a virtual environment (highly recommended)
-Bash# Windows
+### 2. Create a virtual environment
+#### Windows
+```
 python -m venv venv
 venv\Scripts\activate
+```
 
- macOS / Linux
+#### macOS / Linux
+```
 python3 -m venv venv
 source venv/bin/activate
+```
 You’ll see (venv) in your terminal when it’s active.
 
-### 4. Make chromedriver executable (only needed once)
+### 3. Make chromedriver executable
+```
 chmod +x chromedriver
+```
 
-### 5. Run the bot
+### 4. Run the bot
 ```
 python test.py
-
 ```
 You’ll see output like:
 ```
