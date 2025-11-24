@@ -24,7 +24,7 @@ def human_delay(min_sec=4, max_sec=6):
     time.sleep(random.uniform(min_sec, max_sec))
 
 def long_break():
-    secs = random.randint(120 * 60, 130 * 60)
+    secs = random.randint(5 * 60, 10 * 60)
     mins = secs // 60
     print(f"Taking long break ≈ {mins} minutes ...")
     time.sleep(secs)
@@ -88,6 +88,9 @@ while True:
             vote_for(cat, opt)
 
         print(f"\nAll {len(VOTES)} votes completed in cycle #{cycle}!\n")
+        print("Refreshing page and preparing for next cycle...\n")
+        driver.get(URL)
+        time.sleep(3)
         long_break()
 
     except KeyboardInterrupt:
@@ -98,4 +101,4 @@ while True:
         time.sleep(300)
 
 driver.quit()
-print("Bot finished. Browser closed.")
+print("Finished. Browser closed.")
