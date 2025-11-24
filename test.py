@@ -1,141 +1,101 @@
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import *
 import time
+import random
+import random
+import datetime
 
-driver = webdriver.Chrome()
-driver.get("https://mombasabusinessawards.kenyachamber.co.ke/vote/")
+# CONFIGURATION 
+URL = "https://mombasabusinessawards.kenyachamber.co.ke/vote/"
 
-time.sleep(3)
+VOTES = [
+    ("BEST START UP BUSINESS", "Intrasoft Technologies Limited"),
+    ("MOST INNOVATIVE BUSINESS", "Hazina Group Foundation"),
+    ("BEST INNOVATION HUB", "Intrasoft Tech and Innovation Hub"),
+    ("BEST USE OF TECHNOLOGY", "Intrasoft Technologies Limited"),
+    ("BEST TRAINING INSTITUTION", "Intrasoft Tech and Innovation Hub"),
+    ("BEST BUSINESS DEVELOPMENT SERVICE PROVIDER", "Hazina Group Foundation"),
+    ("BEST MICROFINANCE", "Hazina Group Foundation"),
+]
 
-# Best Start Up Business - Intrasoft Technologies Limited
-option_label = driver.find_element(
-    By.XPATH, "//label[contains(., 'Intrasoft Technologies Limited')]"
-)
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", option_label)
-time.sleep(1.5)
+def human_delay(min_sec=4, max_sec=6):
+    time.sleep(random.uniform(min_sec, max_sec))
 
-option_label.click()
-time.sleep(1)
+def long_break():
+    secs = random.randint(120 * 60, 130 * 60)
+    mins = secs // 60
+    print(f"Taking long break ≈ {mins} minutes ...")
+    time.sleep(secs)
 
-vote_button = driver.find_element(By.CSS_SELECTOR, "input.ays_finish_poll[value='Vote']")
+options = webdriver.ChromeOptions()
+options.add_argument('--disable-blink-features=AutomationControlled')
+options.add_experimental_option("excludeSwitches", ["enable-automation"])
+options.add_experimental_option('useAutomationExtension', False)
 
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", vote_button)
-time.sleep(5)
-vote_button.click()
-print("Voted BEST START UP BUSINESS as Intrasoft Technologies Limited successfully!")
-# Best Start Up Business - Intrasoft Technologies Limited done
-time.sleep(5)
-# Best Start Up Business - Hazina Group Foundation
-option_label = driver.find_element(
-    By.XPATH, "//label[contains(., 'Hazina Group Foundation')]"
-)
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", option_label)
-time.sleep(5)
+driver = webdriver.Chrome(options=options)
+driver.maximize_window()
+driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
 
-option_label.click()
-time.sleep(5)
+actions = ActionChains(driver)
 
-vote_button = driver.find_element(By.CSS_SELECTOR, "input.ays_finish_poll[value='Vote']")
+# FUNCTION TO VOTE IN A CATEGORY
+def vote_for(category_name, option_text):
+    print(f"[{datetime.datetime.now():%H:%M:%S}] Voting {category_name} → {option_text}")
 
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", vote_button)
-time.sleep(5)
-vote_button.click()
-print("Voted MOST INNOVATIVE BUSINESS as Hazina Group Foundation successfully!")
-# Best Start Up Business - Hazina Group Foundation done
-time.sleep(5)
-# Best Innovation Hub - Intrasoft Tech and Innovation Hub
-option_label = driver.find_element(
-    By.XPATH, "//label[contains(., 'Intrasoft Tech and Innovation Hub')]"
-)
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", option_label)
-time.sleep(5)
+    try:
+        label = driver.find_element(By.XPATH, f"//label[contains(., '{option_text}')]")
 
-option_label.click()
-time.sleep(5)
+        poll_container = label.find_element(By.XPATH, "./ancestor::div[contains(@id, 'ays-poll-id-')]")
 
-vote_button = driver.find_element(By.CSS_SELECTOR, "input.ays_finish_poll[value='Vote']")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", poll_container)
+        human_delay(2, 4)
 
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", vote_button)
-time.sleep(5)
-vote_button.click()
-print("Voted BEST INNOVATION HUB as Intrasoft Tech and Innovation Hub successfully!")
-# Best Innovation Hub - Intrasoft Tech and Innovation Hub done
-time.sleep(5)
-# Best Use of Technology - Intrasoft Technologies Limited
-option_label = driver.find_element(
-    By.XPATH, "//label[contains(., 'Intrasoft Technologies Limited')]"
-)
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", option_label)
-time.sleep(5)
+        actions.move_to_element_with_offset(label, random.randint(-40, 40), random.randint(-15, 15))\
+               .pause(random.uniform(0.3, 0.9))\
+               .click(label)\
+               .perform()
+        human_delay(3, 5)
 
-option_label.click()
-time.sleep(5)
+        vote_btn = poll_container.find_element(By.CSS_SELECTOR, "input.ays_finish_poll[value='Vote']")
 
-vote_button = driver.find_element(By.CSS_SELECTOR, "input.ays_finish_poll[value='Vote']")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'nearest'});", vote_btn)
+        human_delay(1.5, 3.5)
 
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", vote_button)
-time.sleep(5)
-vote_button.click()
-print("Voted BEST USE OF TECHNOLOGY as Intrasoft Technologies Limited successfully!")
-# Best Use of Technology - Intrasoft Technologies Limited done
-time.sleep(5)
-# Best Training Institution - Intrasoft Tech and Innovation Hub
-option_label = driver.find_element(
-    By.XPATH, "//label[contains(., 'Intrasoft Tech and Innovation Hub')]"
-)
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", option_label)
-time.sleep(5)
+        actions.move_to_element(vote_btn).pause(random.uniform(0.4, 1.2)).click().perform()
 
-option_label.click()
-time.sleep(5)
+        print(f"Successfully voted {category_name}!")
+        human_delay(4, 7)
 
-vote_button = driver.find_element(By.CSS_SELECTOR, "input.ays_finish_poll[value='Vote']")
+    except Exception as e:
+        print(f"ERROR voting {category_name}: {e}")
 
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", vote_button)
-time.sleep(5)
-vote_button.click()
-print("Voted Intrasoft Tech and Innovation Hub as BEST TRAINING INSTITUTION successfully!")
-# Best Training Institution - Intrasoft Tech and Innovation Hub done
-time.sleep(5)
+print("Mombasa Awards Auto-Voter STARTED – runs all day (Ctrl+C to stop)\n")
 
-# Best Business Development Service Provider - Hazina Group Foundation
-option_label = driver.find_element(
-    By.XPATH, "//label[contains(., 'Hazina Group Foundation')]"
-)
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", option_label)
-time.sleep(5)
+cycle = 0
+while True:
+    cycle += 1
+    # print("\n" + "="*70)
+    print(f"  STARTING CYCLE #{cycle} @ {datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
+    # print("="*70 + "\n")
 
-option_label.click()
-time.sleep(5)
+    try:
+        driver.get(URL)
+        time.sleep(random.uniform(7, 11))         
 
-vote_button = driver.find_element(By.CSS_SELECTOR, "input.ays_finish_poll[value='Vote']")
+        for cat, opt in VOTES:
+            vote_for(cat, opt)
 
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", vote_button)
-time.sleep(5)
-vote_button.click()
-print("Voted Hazina Group Foundation as BEST BUSINESS DEVELOPMENT SERVICE PROVIDER successfully!")
-# Best Business Development Service Provider - Hazina Group Foundation done
-time.sleep(5)
+        print(f"\nAll {len(VOTES)} votes completed in cycle #{cycle}!\n")
+        long_break()
 
-# Best Microfinance Institution - Hazina Group Foundation
-option_label = driver.find_element(
-    By.XPATH, "//label[contains(., 'Hazina Group Foundation')]"
-)
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", option_label)
-time.sleep(5)
-
-option_label.click()
-time.sleep(5)
-
-vote_button = driver.find_element(By.CSS_SELECTOR, "input.ays_finish_poll[value='Vote']")
-
-driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", vote_button)
-time.sleep(5)
-vote_button.click()
-print("Voted Hazina Group Foundation as BEST BEST MICROFINANCE successfully!")
-# Best Microfinance Institution - Hazina Group Foundation done
-time.sleep(5)
-
+    except KeyboardInterrupt:
+        print("\nStopped by user. Closing browser...")
+        break
+    except Exception as e:
+        print(f"\nUnexpected error: {e}\nRestarting in 5 minutes...")
+        time.sleep(300)
 
 driver.quit()
+print("Bot finished. Browser closed.")
