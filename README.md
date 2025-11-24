@@ -9,34 +9,52 @@
 ### Installation & Setup
 
 #### 1. Clone the repository
+
 ```bash
 git clone https://github.com/joeahkim/MombasaBAw.git
 cd MombasaBAw
 ```
+
 ### 2. Create a virtual environment
+
 #### Windows
+
 ```
 python -m venv venv
 venv\Scripts\activate
 ```
 
 #### macOS / Linux
+
 ```
 python3 -m venv venv
 source venv/bin/activate
 ```
+
 You’ll see (venv) in your terminal when it’s active.
 
 ### 3. Make chromedriver executable
+
+##### (Linux and macOs)
+
 ```
 chmod +x chromedriver
 ```
 
+#### Windows
+
+```
+  pip install selenium webdriver-manager
+```
+
 ### 4. Run the bot
+
 ```
 python test.py
 ```
+
 You’ll see output like:
+
 ```
 Mombasa Awards Auto-Voter STARTED – runs all day (Ctrl+C to stop)
 
