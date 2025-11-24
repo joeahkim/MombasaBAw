@@ -74,7 +74,7 @@ def vote_for(category_name, option_text):
     except Exception as e:
         print(f"ERROR voting {category_name}: {e}")
 
-print("Mombasa Awards Auto-Voter STARTED – runs all day (Ctrl+C to stop)\n")
+print("Mombasa Awards Auto-Voter STARTED (Ctrl+C to stop)\n")
 
 cycle = 0
 while True:
