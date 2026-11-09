@@ -10,15 +10,56 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 
 URL = "https://mombasabusinessawards.kenyachamber.co.ke/vote/"
-SECTION_XPATHS = (
-    '//*[@id="scroll"]/section[2]/div/div[3]/div[2]',
-    "/html/body/section[2]/div/div[3]/div[2]",
+SECTIONS = (
+    (
+        "CEO of The Year",
+        (
+            '//*[@id="scroll"]/section[2]/div/div[3]/div[2]',
+            "/html/body/section[2]/div/div[3]/div[2]",
+        ),
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[2]/div/ul/li[14]',
+    ),
+    (
+        "Most Innovative Business",
+        ('//*[@id="scroll"]/section[2]/div/div[3]/div[3]',),
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[3]/div/ul/li[13]',
+    ),
 )
-NOMINEE_XPATH = '//*[@id="scroll"]/section[2]/div/div[3]/div[2]/div/ul/li[14]'
 
 
 def log(message):
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {message}", flush=True)
+
+
+def check_section(driver, name, section_xpaths, nominee_xpath):
+    section = None
+    for xpath in section_xpaths:
+        try:
+            section = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, xpath))
+            )
+            break
+        except TimeoutException:
+            continue
+
+    if section is None:
+        log(f"{name} section not found.")
+        return
+
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", section)
+    log(f"{name} section found.")
+
+    try:
+        nominee = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, nominee_xpath))
+        )
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", nominee)
+        if "Intrasoft Technologies" in nominee.text:
+            log("Intrasoft Technologies found.")
+        else:
+            log("Intrasoft Technologies not found.")
+    except TimeoutException:
+        log("Intrasoft Technologies not found.")
 
 
 def main():
@@ -37,38 +78,8 @@ def main():
             == "complete"
         )
 
-        section = None
-        for xpath in SECTION_XPATHS:
-            try:
-                section = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.XPATH, xpath))
-                )
-                break
-            except TimeoutException:
-                continue
-
-        if section is None:
-            log("CEO of The Year section not found.")
-            return
-
-        driver.execute_script(
-            "arguments[0].scrollIntoView({block: 'center'});", section
-        )
-        log("CEO of The Year section found.")
-
-        try:
-            nominee = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, NOMINEE_XPATH))
-            )
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center'});", nominee
-            )
-            if "Intrasoft Technologies" in nominee.text:
-                log("Intrasoft Technologies found.")
-            else:
-                log("Intrasoft Technologies not found.")
-        except TimeoutException:
-            log("Intrasoft Technologies not found.")
+        for name, section_xpaths, nominee_xpath in SECTIONS:
+            check_section(driver, name, section_xpaths, nominee_xpath)
 
     except TimeoutException as error:
         log(f"Timed out while waiting for the page to load: {error}")
