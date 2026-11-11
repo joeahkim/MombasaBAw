@@ -37,7 +37,7 @@ SECTIONS = (
         "Best SME",
         ('//*[@id="scroll"]/section[2]/div/div[3]/div[20]',),
         '//*[@id="scroll"]/section[2]/div/div[3]/div[20]/div/ul/li[15]',
-        "Intrasoft Technologies ltd",
+        "INTRASOFT TECHNOLOGIES LIMITED",
     ),
     (
         "Best Innovation & Social Impact Hub",
@@ -79,14 +79,26 @@ def check_section(driver, name, section_xpaths, nominee_xpath, nominee_name):
 
     try:
         nominee = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, nominee_xpath))
+            lambda browser: next(
+                (
+                    element
+                    for element in browser.find_elements(By.XPATH, nominee_xpath)
+                    if element.is_displayed()
+                ),
+                False,
+            )
         )
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", nominee)
         time.sleep(3)
-        if nominee_name.casefold() in nominee.text.casefold():
+        nominee_text = " ".join(
+            (nominee.get_attribute("textContent") or nominee.text)
+            .replace("\xa0", " ")
+            .split()
+        )
+        if nominee_name.casefold() in nominee_text.casefold():
             log(f"{nominee_name} found.")
         else:
-            log(f"{nominee_name} not found.")
+            log(f"{nominee_name} not found. Element text: {nominee_text!r}")
     except TimeoutException:
         log(f"{nominee_name} not found.")
 
