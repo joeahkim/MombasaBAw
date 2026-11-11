@@ -45,6 +45,12 @@ SECTIONS = (
         '//*[@id="scroll"]/section[2]/div/div[3]/div[26]/div/ul/li[2]',
         "HAZINA GROUP FOUNDATION",
     ),
+    (
+        "Most Inclusive Enterprise",
+        ('//*[@id="scroll"]/section[2]/div/div[3]/div[35]',),
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[35]/div/ul/li[3]',
+        "HAZINA GROUP FOUNDATION",
+    ),
 )
 
 
