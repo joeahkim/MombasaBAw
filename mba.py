@@ -629,12 +629,6 @@ def vote_account(account, state, pause=False):
     )
     return successes, attempted, time_locked
 
-
-# ---------------------------------------------------------------------------
-# One pass / daemon loop
-# ---------------------------------------------------------------------------
-
-
 def run_pass(accounts, state, force=False, pause=False):
     """Vote every due account once. Returns (attempted, succeeded, time_locked)."""
     due_accounts = [a for a in accounts if account_due(state, a, force=force)[0]]
@@ -693,9 +687,7 @@ def run_once(accounts, force=False, pause=False):
 
 def run_forever(force=False, pause=False, account_filter=None, poll=DEFAULT_POLL_SECONDS):
     """Daemon loop: process due accounts, sleep until the next is due."""
-    log("=" * 60)
-    log("Daemon mode started. Press Ctrl+C to stop.")
-    log("=" * 60)
+    log("SESSION STARTED. Press Ctrl+C to stop.")
 
     force_next_pass = force
     last_logged_target = None
