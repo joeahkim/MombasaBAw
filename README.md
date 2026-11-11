@@ -1,8 +1,8 @@
 # Mombasa Business Awards Auto-Voter
 
-Automated voter for the [Mombasa Business Awards](https://mombasabusinessawards.kenyachamber.co.ke/vote/). Votes for a list of nominees across multiple categories, using multiple accounts, each on its own randomised schedule (every **2 h 03 m – 2 h 15 m**), and respects the site's own time-lock messages when it tells us to wait.
+Automated voter for the [Mombasa Business Awards](https://mombasabusinessawards.kenyachamber.co.ke/vote/). Votes for a list of nominees across multiple categories, using multiple accounts, each on its own randomised schedule (every **2 h 03 m to 2 h 15 m**), and respects the site's own time-lock messages when it tells us to wait.
 
-Runs as a **long-lived daemon** — start it once, leave it running, `Ctrl+C` to stop.
+Runs as a **long-lived daemon**: start it once, leave it running, `Ctrl+C` to stop.
 
 ---
 
@@ -10,7 +10,7 @@ Runs as a **long-lived daemon** — start it once, leave it running, `Ctrl+C` to
 
 - [Requirements](#requirements)
 - [Installation](#installation)
-- [Configuration — `details.txt`](#configuration--detailstxt)
+- [Configuration: `details.txt`](#configuration-detailstxt)
 - [Running the bot](#running-the-bot)
 - [Command-line options](#command-line-options)
 - [How scheduling works](#how-scheduling-works)
@@ -61,11 +61,11 @@ You'll see `(venv)` in the prompt once it's active.
 pip install selenium webdriver-manager
 ```
 
-That's all that's needed. `webdriver-manager` will fetch the correct `chromedriver` for your installed Chrome on first run — no manual download.
+That's all that's needed. `webdriver-manager` will fetch the correct `chromedriver` for your installed Chrome on first run, so no manual download is required.
 
 ---
 
-## Configuration — `details.txt`
+## Configuration: `details.txt`
 
 Each account is one `[RECORD_ID]` block in `details.txt`, next to `mba.py`:
 
@@ -95,13 +95,13 @@ Rules:
 
 Lines starting with `#` are comments and are ignored. Duplicate IDs or emails will cause the bot to refuse to start with a clear error.
 
-You can add or remove accounts between runs — the daemon re-reads `details.txt` every poll, so edits take effect without restarting.
+You can add or remove accounts between runs; the daemon re-reads `details.txt` every poll, so edits take effect without restarting.
 
 ---
 
 ## Running the bot
 
-### Daemon mode (default — recommended)
+### Daemon mode (default and recommended)
 
 ```bash
 python mba.py
@@ -131,7 +131,7 @@ You'll see something like:
 [2026-11-11 11:22:14] [TEST_RECORD_1] Clicked Vote for Intrasoft Technologies.
 [2026-11-11 11:22:16] [TEST_RECORD_1] Filled email='sample1@example.com', phone='+254700000000'.
 [2026-11-11 11:22:16] [TEST_RECORD_1] Clicked submit.
-[2026-11-11 11:22:18] [TEST_RECORD_1] Vote form closed for Intrasoft Technologies — vote accepted.
+[2026-11-11 11:22:18] [TEST_RECORD_1] Vote form closed for Intrasoft Technologies: vote accepted.
 ...
 [2026-11-11 11:23:02] [TEST_RECORD_1] Recorded 6 vote(s); next at 2026-11-11T13:27:44 (+2h04m11s).
 [2026-11-11 11:23:02] [TEST_RECORD_1] Browser closed.
@@ -142,7 +142,7 @@ You'll see something like:
 [2026-11-11 11:24:10] Next due at 2026-11-11 13:27:44 (2h03m34s from now). Sleeping up to 5m00s per poll.
 ```
 
-While idle, the bot only prints the "Next due at …" line when the target time changes — the log stays quiet.
+While idle, the bot only prints the "Next due at …" line when the target time changes, so the log stays quiet.
 
 ### One-shot mode (single pass, then exit)
 
@@ -152,10 +152,10 @@ python mba.py --once
 
 Useful for testing or for wiring into an external scheduler (Task Scheduler, cron). Runs one pass over due accounts, then exits with:
 
-- `0` — done or nothing was due
-- `1` — pass ran but every vote failed
-- `3` — `--account` not found in `details.txt`
-- `4` — `details.txt` missing/invalid
+- `0` for done or nothing was due
+- `1` for pass ran but every vote failed
+- `3` for `--account` not found in `details.txt`
+- `4` for `details.txt` missing or invalid
 
 ### Inspect schedule without voting
 
@@ -192,13 +192,13 @@ No browser is launched.
 
 | Flag           | Description                                                                                                           |
 | -------------- | --------------------------------------------------------------------------------------------------------------------- |
-| _(none)_       | **Daemon mode** — run forever, voting on schedule.                                                                    |
+| _(none)_       | **Daemon mode**: run forever, voting on schedule.                                                                     |
 | `--once`       | Single pass, then exit.                                                                                               |
 | `--status`     | Print per-account schedule state, exit.                                                                               |
 | `--account ID` | Only process this `[RECORD_ID]`. Works with daemon or `--once`.                                                       |
 | `--force`      | Ignore schedule gate. In daemon mode only affects the first pass, to prevent runaway re-voting.                       |
 | `--poll N`     | Seconds between idle wake-ups (default `300`). Lower = faster pickup of `details.txt` edits; higher = fewer wake-ups. |
-| `--pause`      | Prompt before closing each browser — debugging only.                                                                  |
+| `--pause`      | Prompt before closing each browser (debugging only).                                                                  |
 
 ---
 
@@ -206,13 +206,13 @@ No browser is launched.
 
 Each account has its own independent schedule, stored in `vote_state.json`:
 
-- **First run** — account has no record → treated as due immediately.
-- **After a successful run** — `next_vote_at = now + random(7,380 s … 8,100 s)` i.e. **2 h 03 m – 2 h 15 m**.
-- **After a time-lock** — `next_vote_at = <parsed time from the message> + 60 s buffer`.
+- **First run**: account has no record, so it's treated as due immediately.
+- **After a successful run**: `next_vote_at = now + random(7,380 s … 8,100 s)` i.e. **2 h 03 m to 2 h 15 m**.
+- **After a time-lock**: `next_vote_at = <parsed time from the message> + 60 s buffer`.
 
 The daemon always picks the **earliest** future `next_vote_at` across all accounts and sleeps until then (capped at `--poll` so it wakes periodically to reload `details.txt` and to recover from clock drift).
 
-Because state is persisted to disk after each account finishes, killing and restarting the process **does not reset the schedule** — it resumes exactly where it stopped.
+Because state is persisted to disk after each account finishes, killing and restarting the process **does not reset the schedule**; it resumes exactly where it stopped.
 
 ---
 
@@ -231,7 +231,7 @@ rm -rf chrome_profiles/TEST_RECORD_1
 
 Then edit `vote_state.json` and remove the `TEST_RECORD_1` block (or just delete the whole file to reset everything). The next run recreates both.
 
-`chrome_profiles/` can grow over time (each profile is ~50–150 MB). Deleting accounts you no longer need is safe.
+`chrome_profiles/` can grow over time (each profile is ~50 to 150 MB). Deleting accounts you no longer need is safe.
 
 ---
 
@@ -244,4 +244,4 @@ Press **`Ctrl+C`** in the terminal:
 - State for completed accounts is already saved.
 - The process exits cleanly.
 
-Restart with `python mba.py` — it resumes from the persisted schedule with no votes missed and no duplicates.
+Restart with `python mba.py` and it resumes from the persisted schedule with no votes missed and no duplicates.
