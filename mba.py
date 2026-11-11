@@ -39,6 +39,12 @@ SECTIONS = (
         '//*[@id="scroll"]/section[2]/div/div[3]/div[20]/div/ul/li[15]',
         "Intrasoft Technologies ltd",
     ),
+    (
+        "Best Innovation & Social Impact Hub",
+        ('//*[@id="scroll"]/section[2]/div/div[3]/div[26]',),
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[26]/div/ul/li[2]',
+        "HAZINA GROUP FOUNDATION",
+    ),
 )
 
 
