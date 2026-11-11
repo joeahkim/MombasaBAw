@@ -18,7 +18,11 @@ from details import load_details  # the second script, save as details.py
 
 URL = "https://mombasabusinessawards.kenyachamber.co.ke/vote/"
 
-# Each entry: (section name, section xpaths, nominee xpath, nominee name, vote button xpath or None)
+# Each entry:
+#   (section name, section xpaths, nominee xpath, nominee name,
+#    vote button xpath, fill_details)
+# fill_details=True  -> fill email/phone from details.txt before submitting
+# fill_details=False -> submit only; the page has stored the form details
 SECTIONS = (
     (
         "CEO of The Year",
@@ -26,41 +30,47 @@ SECTIONS = (
         '//*[@id="scroll"]/section[2]/div/div[3]/div[2]/div/ul/li[14]',
         "Intrasoft Technologies",
         '//*[@id="scroll"]/section[2]/div/div[3]/div[2]/div/ul/li[14]/button',
+        True,
     ),
     (
         "Most Innovative Business",
         ('//*[@id="scroll"]/section[2]/div/div[3]/div[3]/div/h3',),
         '//*[@id="scroll"]/section[2]/div/div[3]/div[3]/div/ul/li[13]',
         "Intrasoft Technologies",
-        None,
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[3]/div/ul/li[13]/button',
+        False,
     ),
     (
         "Best in Corporate Social Responsibility",
         ('//*[@id="scroll"]/section[2]/div/div[3]/div[15]/div/h3',),
         '//*[@id="scroll"]/section[2]/div/div[3]/div[15]/div/ul/li[4]',
         "Hazina Group Foundation",
-        None,
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[15]/div/ul/li[4]/button',
+        False,
     ),
     (
         "Best SME",
         ('//*[@id="scroll"]/section[2]/div/div[3]/div[20]/div/h3',),
         '//*[@id="scroll"]/section[2]/div/div[3]/div[20]/div/ul/li[15]',
         "INTRASOFT TECHNOLOGIES LIMITED",
-        None,
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[20]/div/ul/li[15]/button',
+        False,
     ),
     (
         "Best Innovation & Social Impact Hub",
         ('//*[@id="scroll"]/section[2]/div/div[3]/div[26]/div/h3',),
         '//*[@id="scroll"]/section[2]/div/div[3]/div[26]/div/ul/li[2]',
         "HAZINA GROUP FOUNDATION",
-        None,
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[26]/div/ul/li[2]/button',
+        False,
     ),
     (
         "Most Inclusive Enterprise",
         ('//*[@id="scroll"]/section[2]/div/div[3]/div[35]/div/h3',),
         '//*[@id="scroll"]/section[2]/div/div[3]/div[35]/div/ul/li[3]',
         "HAZINA GROUP FOUNDATION",
-        None,
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[35]/div/ul/li[3]/button',
+        False,
     ),
 )
 
@@ -158,8 +168,13 @@ def _collect_error_text(driver):
     return " | ".join(found)
 
 
-def cast_vote(driver, nominee_name, vote_button_xpath, details):
-    """Click Vote, fill email + phone, submit, and confirm the form closes.
+def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
+    """Click Vote, optionally fill email/phone, submit, confirm form closes.
+
+    If ``details`` is provided, the email/phone fields are filled from it
+    (the CEO of The Year flow). If ``details`` is None, the fields are left
+    as-is because the page has already stored them from the previous vote,
+    and only Submit is clicked.
 
     On success (form disappears on its own) returns True.
     On failure (form still visible after submit) logs the error from
@@ -180,31 +195,40 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details):
         log(f"Vote button not clickable for {nominee_name}.")
         return False
 
-    # 2) Wait for the vote form and its fields.
+    # 2) Wait for the vote form and the submit button.
     try:
         WebDriverWait(driver, 10).until(
             EC.visibility_of_element_located((By.XPATH, VOTE_FORM_XPATH))
-        )
-        email_field = WebDriverWait(driver, 10).until(
-            EC.visibility_of_element_located((By.XPATH, VOTE_EMAIL_XPATH))
-        )
-        phone_field = WebDriverWait(driver, 10).until(
-            EC.visibility_of_element_located((By.XPATH, VOTE_PHONE_XPATH))
         )
         submit_button = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, VOTE_SUBMIT_XPATH))
         )
     except TimeoutException:
-        log("Vote form (email/phone/submit) did not appear.")
+        log("Vote form or submit button did not appear.")
         return False
 
-    # 3) Fill fields and submit.
-    email_field.clear()
-    email_field.send_keys(details["Email"])
-    phone_field.clear()
-    phone_field.send_keys(details["Phone"])
-    log(f"Filled email={details['Email']!r}, phone={details['Phone']!r}.")
+    # 3) Fill email/phone only when details were supplied (CEO of The Year).
+    if details is not None:
+        try:
+            email_field = WebDriverWait(driver, 10).until(
+                EC.visibility_of_element_located((By.XPATH, VOTE_EMAIL_XPATH))
+            )
+            phone_field = WebDriverWait(driver, 10).until(
+                EC.visibility_of_element_located((By.XPATH, VOTE_PHONE_XPATH))
+            )
+        except TimeoutException:
+            log("Email/phone fields did not appear.")
+            return False
 
+        email_field.clear()
+        email_field.send_keys(details["Email"])
+        phone_field.clear()
+        phone_field.send_keys(details["Phone"])
+        log(f"Filled email={details['Email']!r}, phone={details['Phone']!r}.")
+    else:
+        log("Skipping field fill — using details stored on the page.")
+
+    # 4) Submit.
     try:
         submit_button.click()
         log("Clicked submit.")
@@ -212,7 +236,7 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details):
         log(f"Submit click failed: {error}")
         return False
 
-    # 4) Happy path: wait for the form to close on its own.
+    # 5) Happy path: wait for the form to close on its own.
     try:
         WebDriverWait(driver, VOTE_FORM_DISAPPEAR_TIMEOUT).until(
             EC.invisibility_of_element_located((By.XPATH, VOTE_FORM_XPATH))
@@ -222,7 +246,7 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details):
     except TimeoutException:
         log(f"Vote form still visible after submit for {nominee_name} — checking for error.")
 
-    # 5) Error path: the form didn't close. Inspect the specific error div.
+    # 6) Error path: the form didn't close. Inspect the specific error div.
     error_text = ""
     try:
         error_div = WebDriverWait(driver, VOTE_FORM_ERROR_TIMEOUT).until(
@@ -242,7 +266,7 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details):
     else:
         log(f"Vote form still visible for {nominee_name} but no error text found.")
 
-    # 6) Dismiss the form so the page is usable for the next section.
+    # 7) Dismiss the form so the page is usable for the next section.
     try:
         dismiss_button = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, VOTE_FORM_DISMISS_XPATH))
@@ -284,18 +308,31 @@ def main():
             == "complete"
         )
 
-        for name, section_xpaths, nominee_xpath, nominee_name, vote_xpath in SECTIONS:
+        for (
+            name,
+            section_xpaths,
+            nominee_xpath,
+            nominee_name,
+            vote_xpath,
+            fill_details,
+        ) in SECTIONS:
             if find_section(driver, name, section_xpaths) is None:
                 continue
             if find_nominee(driver, nominee_xpath, nominee_name) is None:
                 continue
-            if vote_xpath:
-                voted = cast_vote(driver, nominee_name, vote_xpath, details)
-                if not voted:
-                    # Change this to `break` if you want to stop on first failure.
-                    log(f"Skipping pause for {name}; moving to next section.")
-                    continue
-                time.sleep(2)  # brief pause before next section, per spec
+            if not vote_xpath:
+                continue
+            voted = cast_vote(
+                driver,
+                nominee_name,
+                vote_xpath,
+                details if fill_details else None,
+            )
+            if not voted:
+                # Change this to `break` if you want to stop on first failure.
+                log(f"Skipping pause for {name}; moving to next section.")
+                continue
+            time.sleep(2)  # brief pause before next section, per spec
 
     except TimeoutException as error:
         log(f"Timed out while waiting for the page to load: {error}")
