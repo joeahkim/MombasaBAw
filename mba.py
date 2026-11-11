@@ -1,5 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+import argparse
+import json
+import os
+import random
 import time
+from pathlib import Path
 
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -95,9 +100,150 @@ ERROR_TEXT_XPATHS = (
     '//*[@id="vote-form"]//*[contains(@class, "message")]',
 )
 
+# ---------------------------------------------------------------------------
+# Session + schedule persistence
+# ---------------------------------------------------------------------------
+
+# Where the last-vote time and next-vote time are stored between runs.
+STATE_PATH = Path(__file__).with_name("vote_state.json")
+
+# Persistent Chrome profile so the site's stored form details / cookies /
+# localStorage survive between runs. This is what makes "the page stores the
+# form details" work across separate launches of this script.
+USER_DATA_DIR = Path(__file__).with_name("chrome_profile")
+
+# Required gap between votes: random in [2h03m, 2h15m].
+MIN_INTERVAL_SECONDS = 2 * 3600 + 3 * 60    # 7,380 s
+MAX_INTERVAL_SECONDS = 2 * 3600 + 15 * 60   # 8,100 s
+
+# Keep only the most recent N history entries in the state file.
+HISTORY_LIMIT = 20
+
+
+def _now():
+    return datetime.now()
+
 
 def log(message):
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {message}", flush=True)
+
+
+def _format_delta(seconds):
+    seconds = int(max(0, seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours}h{minutes:02d}m{secs:02d}s"
+
+
+def _parse_dt(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def load_state():
+    """Return the persisted state dict, or {} if missing/unreadable."""
+    if not STATE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        log(f"Could not read state file {STATE_PATH}: {error}. Starting fresh.")
+        return {}
+    if not isinstance(data, dict):
+        log(f"State file {STATE_PATH} is not a JSON object. Starting fresh.")
+        return {}
+    return data
+
+
+def save_state(state):
+    """Atomically write the state dict to STATE_PATH."""
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = STATE_PATH.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp_path, STATE_PATH)
+    except OSError as error:
+        log(f"Could not write state file {STATE_PATH}: {error}")
+
+
+def pick_interval_seconds():
+    """Random vote interval in [2h03m, 2h15m]."""
+    return random.randint(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)
+
+
+def record_vote(state, section, nominee):
+    """Append a successful vote to the state and schedule the next one."""
+    now = _now()
+    entry = {
+        "at": now.isoformat(timespec="seconds"),
+        "section": section,
+        "nominee": nominee,
+    }
+    history = state.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+        state["history"] = history
+    history.append(entry)
+    del history[:-HISTORY_LIMIT]
+
+    interval = pick_interval_seconds()
+    state["last_vote_at"] = entry["at"]
+    state["last_vote_section"] = section
+    state["last_vote_nominee"] = nominee
+    state["interval_seconds"] = interval
+    state["next_vote_at"] = (now + timedelta(seconds=interval)).isoformat(timespec="seconds")
+    save_state(state)
+    log(
+        f"Recorded vote for {nominee} ({section}); "
+        f"next allowed at {state['next_vote_at']} (+{_format_delta(interval)})."
+    )
+
+
+def check_schedule(state, force=False):
+    """Return True if a vote is allowed now, else log why and return False."""
+    next_dt = _parse_dt(state.get("next_vote_at"))
+    if next_dt is None:
+        return True
+
+    remaining = (next_dt - _now()).total_seconds()
+    if remaining <= 0:
+        return True
+
+    if force:
+        log(
+            f"Schedule says next vote at {next_dt:%Y-%m-%d %H:%M:%S} "
+            f"({_format_delta(remaining)} from now) — overriding with --force."
+        )
+        return True
+
+    log(
+        f"Not due yet. Last vote at {state.get('last_vote_at', '?')}, "
+        f"next at {next_dt:%Y-%m-%d %H:%M:%S} ({_format_delta(remaining)} from now). "
+        f"Use --force to override."
+    )
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Browser / page helpers
+# ---------------------------------------------------------------------------
+
+
+def build_driver():
+    """Launch Chrome with a persistent profile so session/form state survives."""
+    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    options = webdriver.ChromeOptions()
+    options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
+    options.add_argument("--profile-directory=Default")
+    driver = webdriver.Chrome(
+        service=ChromeService(ChromeDriverManager().install()),
+        options=options,
+    )
+    return driver
 
 
 def find_section(driver, name, section_xpaths):
@@ -290,15 +436,55 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
     return False
 
 
-def main():
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Mombasa Business Awards voter")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignore the 2h03m–2h15m schedule gate and vote now.",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print the stored schedule/state and exit.",
+    )
+    args = parser.parse_args(argv)
+
+    state = load_state()
+
+    if args.status:
+        if not state:
+            print(json.dumps({"status": "no state file yet", "path": str(STATE_PATH)}, indent=2))
+            return 0
+        next_dt = _parse_dt(state.get("next_vote_at"))
+        payload = dict(state)
+        payload["state_path"] = str(STATE_PATH)
+        payload["user_data_dir"] = str(USER_DATA_DIR)
+        if next_dt is not None:
+            remaining = (next_dt - _now()).total_seconds()
+            payload["seconds_until_next_vote"] = int(max(0, remaining))
+            payload["next_vote_due"] = remaining <= 0
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    if not check_schedule(state, force=args.force):
+        return 2
+
     details = load_details()  # raises on invalid/missing details.txt
     log(f"Loaded details for record {details['id']!r}.")
+    log(f"State file: {STATE_PATH}")
+    log(f"Chrome profile: {USER_DATA_DIR}")
 
     driver = None
+    attempted = 0
+    succeeded = 0
     try:
-        driver = webdriver.Chrome(
-            service=ChromeService(ChromeDriverManager().install())
-        )
+        driver = build_driver()
         driver.maximize_window()
         log(f"Opening {URL}")
         driver.get(URL)
@@ -322,6 +508,7 @@ def main():
                 continue
             if not vote_xpath:
                 continue
+            attempted += 1
             voted = cast_vote(
                 driver,
                 nominee_name,
@@ -332,6 +519,8 @@ def main():
                 # Change this to `break` if you want to stop on first failure.
                 log(f"Skipping pause for {name}; moving to next section.")
                 continue
+            succeeded += 1
+            record_vote(state, name, nominee_name)
             time.sleep(2)  # brief pause before next section, per spec
 
     except TimeoutException as error:
@@ -349,6 +538,11 @@ def main():
             driver.quit()
             log("Browser closed.")
 
+    log(f"Run complete: {succeeded}/{attempted} votes accepted.")
+    if attempted and not succeeded:
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
