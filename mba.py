@@ -18,11 +18,19 @@ SECTIONS = (
             "/html/body/section[2]/div/div[3]/div[2]",
         ),
         '//*[@id="scroll"]/section[2]/div/div[3]/div[2]/div/ul/li[14]',
+        "Intrasoft Technologies",
     ),
     (
         "Most Innovative Business",
         ('//*[@id="scroll"]/section[2]/div/div[3]/div[3]',),
         '//*[@id="scroll"]/section[2]/div/div[3]/div[3]/div/ul/li[13]',
+        "Intrasoft Technologies",
+    ),
+    (
+        "Best in Corporate Social Responsibility",
+        ('//*[@id="scroll"]/section[2]/div/div[3]/div[15]',),
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[15]/div/ul/li[4]',
+        "Hazina Group Foundation",
     ),
 )
 
@@ -31,7 +39,7 @@ def log(message):
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {message}", flush=True)
 
 
-def check_section(driver, name, section_xpaths, nominee_xpath):
+def check_section(driver, name, section_xpaths, nominee_xpath, nominee_name):
     section = None
     for xpath in section_xpaths:
         try:
@@ -54,12 +62,12 @@ def check_section(driver, name, section_xpaths, nominee_xpath):
             EC.presence_of_element_located((By.XPATH, nominee_xpath))
         )
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", nominee)
-        if "Intrasoft Technologies" in nominee.text:
-            log("Intrasoft Technologies found.")
+        if nominee_name in nominee.text:
+            log(f"{nominee_name} found.")
         else:
-            log("Intrasoft Technologies not found.")
+            log(f"{nominee_name} not found.")
     except TimeoutException:
-        log("Intrasoft Technologies not found.")
+        log(f"{nominee_name} not found.")
 
 
 def main():
@@ -78,8 +86,8 @@ def main():
             == "complete"
         )
 
-        for name, section_xpaths, nominee_xpath in SECTIONS:
-            check_section(driver, name, section_xpaths, nominee_xpath)
+        for name, section_xpaths, nominee_xpath, nominee_name in SECTIONS:
+            check_section(driver, name, section_xpaths, nominee_xpath, nominee_name)
 
     except TimeoutException as error:
         log(f"Timed out while waiting for the page to load: {error}")
