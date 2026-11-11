@@ -1,4 +1,4 @@
-# Mombasa Business Awards Auto-Voter
+# Mombasa Business Awards
 
 Automated voter for the [Mombasa Business Awards](https://mombasabusinessawards.kenyachamber.co.ke/vote/). Votes for a list of nominees across multiple categories, using multiple accounts, each on its own randomised schedule (every **2 h 03 m to 2 h 15 m**), and respects the site's own time-lock messages when it tells us to wait.
 
