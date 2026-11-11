@@ -318,13 +318,44 @@ def compute_next_wake(state, accounts, max_sleep):
 def build_driver(account):
     profile = _profile_dir_for(account)
     profile.mkdir(parents=True, exist_ok=True)
+
     options = webdriver.ChromeOptions()
+    # Existing: per-account persistent profile so stored form details survive.
     options.add_argument(f"--user-data-dir={profile}")
     options.add_argument("--profile-directory=Default")
-    return webdriver.Chrome(
+
+    # Anti-automation fingerprints.
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    driver = webdriver.Chrome(
         service=ChromeService(ChromeDriverManager().install()),
         options=options,
     )
+    driver.maximize_window()
+
+    # Hide navigator.webdriver and related properties at the JS level.
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => false});
+                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                window.chrome = window.chrome || { runtime: {} };
+                const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+                if (originalQuery) {
+                    window.navigator.permissions.query = (parameters) =>
+                        parameters.name === 'notifications'
+                            ? Promise.resolve({ state: Notification.permission })
+                            : originalQuery(parameters);
+                }
+            """
+        },
+    )
+
+    return driver
 
 
 def find_section(driver, name, section_xpaths):
