@@ -1,4 +1,5 @@
 from datetime import datetime
+import time
 
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -62,12 +63,14 @@ def check_section(driver, name, section_xpaths, nominee_xpath, nominee_name):
 
     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", section)
     log(f"{name} section found.")
+    time.sleep(3)
 
     try:
         nominee = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.XPATH, nominee_xpath))
         )
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", nominee)
+        time.sleep(3)
         if nominee_name.casefold() in nominee.text.casefold():
             log(f"{nominee_name} found.")
         else:
