@@ -13,7 +13,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-from details import load_details  # the second script, save as load_details.py
+from details import load_details  # the second script, save as details.py
 
 
 URL = "https://mombasabusinessawards.kenyachamber.co.ke/vote/"
@@ -67,6 +67,23 @@ SECTIONS = (
 VOTE_EMAIL_XPATH = '//*[@id="vote-email"]'
 VOTE_PHONE_XPATH = '//*[@id="vote-phone"]'
 VOTE_SUBMIT_XPATH = '//*[@id="vote-submit"]'
+VOTE_FORM_XPATH = '//*[@id="vote-form"]'
+VOTE_FORM_ERROR_XPATH = '//*[@id="vote-form"]/div[2]/div[2]/div'
+VOTE_FORM_DISMISS_XPATH = '//*[@id="vote-form"]/div[1]/button'
+
+# How long to wait for the vote form to auto-close after submit before assuming failure.
+VOTE_FORM_DISAPPEAR_TIMEOUT = 10
+# How long to wait for the specific error div to appear after that.
+VOTE_FORM_ERROR_TIMEOUT = 5
+
+# Fallback XPaths checked for error text inside the form if the specific error div is empty/absent.
+ERROR_TEXT_XPATHS = (
+    '//*[@id="vote-form"]//*[contains(@class, "error")]',
+    '//*[@id="vote-form"]//*[contains(@class, "invalid")]',
+    '//*[@id="vote-form"]//*[@role="alert"]',
+    '//*[@id="vote-error"]',
+    '//*[@id="vote-form"]//*[contains(@class, "message")]',
+)
 
 
 def log(message):
@@ -121,8 +138,35 @@ def find_nominee(driver, nominee_xpath, nominee_name):
     return None
 
 
+def _collect_error_text(driver):
+    """Return any visible error text inside the vote form, or ''."""
+    found = []
+    for xpath in ERROR_TEXT_XPATHS:
+        try:
+            for element in driver.find_elements(By.XPATH, xpath):
+                if not element.is_displayed():
+                    continue
+                text = " ".join(
+                    (element.get_attribute("textContent") or element.text)
+                    .replace("\xa0", " ")
+                    .split()
+                )
+                if text and text not in found:
+                    found.append(text)
+        except WebDriverException:
+            continue
+    return " | ".join(found)
+
+
 def cast_vote(driver, nominee_name, vote_button_xpath, details):
-    """Click Vote, fill email + phone, submit. Returns True on success."""
+    """Click Vote, fill email + phone, submit, and confirm the form closes.
+
+    On success (form disappears on its own) returns True.
+    On failure (form still visible after submit) logs the error from
+    //*[@id="vote-form"]/div[2]/div[2]/div, clicks the dismiss button at
+    //*[@id="vote-form"]/div[1]/button, and returns False.
+    """
+    # 1) Click the nominee's Vote button.
     try:
         vote_button = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, vote_button_xpath))
@@ -136,7 +180,11 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details):
         log(f"Vote button not clickable for {nominee_name}.")
         return False
 
+    # 2) Wait for the vote form and its fields.
     try:
+        WebDriverWait(driver, 10).until(
+            EC.visibility_of_element_located((By.XPATH, VOTE_FORM_XPATH))
+        )
         email_field = WebDriverWait(driver, 10).until(
             EC.visibility_of_element_located((By.XPATH, VOTE_EMAIL_XPATH))
         )
@@ -150,6 +198,7 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details):
         log("Vote form (email/phone/submit) did not appear.")
         return False
 
+    # 3) Fill fields and submit.
     email_field.clear()
     email_field.send_keys(details["Email"])
     phone_field.clear()
@@ -163,7 +212,58 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details):
         log(f"Submit click failed: {error}")
         return False
 
-    return True
+    # 4) Happy path: wait for the form to close on its own.
+    try:
+        WebDriverWait(driver, VOTE_FORM_DISAPPEAR_TIMEOUT).until(
+            EC.invisibility_of_element_located((By.XPATH, VOTE_FORM_XPATH))
+        )
+        log(f"Vote form closed for {nominee_name} — vote accepted.")
+        return True
+    except TimeoutException:
+        log(f"Vote form still visible after submit for {nominee_name} — checking for error.")
+
+    # 5) Error path: the form didn't close. Inspect the specific error div.
+    error_text = ""
+    try:
+        error_div = WebDriverWait(driver, VOTE_FORM_ERROR_TIMEOUT).until(
+            EC.presence_of_element_located((By.XPATH, VOTE_FORM_ERROR_XPATH))
+        )
+        error_text = " ".join(
+            (error_div.get_attribute("textContent") or error_div.text)
+            .replace("\xa0", " ")
+            .split()
+        )
+    except TimeoutException:
+        # Fall back to generic probes so we still log *something*.
+        error_text = _collect_error_text(driver)
+
+    if error_text:
+        log(f"Vote error for {nominee_name}: {error_text!r}")
+    else:
+        log(f"Vote form still visible for {nominee_name} but no error text found.")
+
+    # 6) Dismiss the form so the page is usable for the next section.
+    try:
+        dismiss_button = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, VOTE_FORM_DISMISS_XPATH))
+        )
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});", dismiss_button
+        )
+        dismiss_button.click()
+        log("Clicked dismiss button on the vote form.")
+        # Best-effort confirmation the form actually closed.
+        try:
+            WebDriverWait(driver, 5).until(
+                EC.invisibility_of_element_located((By.XPATH, VOTE_FORM_XPATH))
+            )
+            log("Vote form dismissed.")
+        except TimeoutException:
+            log("Vote form still visible after dismiss click.")
+    except TimeoutException:
+        log('Dismiss button //*[@id="vote-form"]/div[1]/button not clickable.')
+
+    return False
 
 
 def main():
@@ -190,7 +290,11 @@ def main():
             if find_nominee(driver, nominee_xpath, nominee_name) is None:
                 continue
             if vote_xpath:
-                cast_vote(driver, nominee_name, vote_xpath, details)
+                voted = cast_vote(driver, nominee_name, vote_xpath, details)
+                if not voted:
+                    # Change this to `break` if you want to stop on first failure.
+                    log(f"Skipping pause for {name}; moving to next section.")
+                    continue
                 time.sleep(2)  # brief pause before next section, per spec
 
     except TimeoutException as error:
