@@ -32,6 +32,12 @@ SECTIONS = (
         '//*[@id="scroll"]/section[2]/div/div[3]/div[15]/div/ul/li[4]',
         "Hazina Group Foundation",
     ),
+    (
+        "Best SME",
+        ('//*[@id="scroll"]/section[2]/div/div[3]/div[20]',),
+        '//*[@id="scroll"]/section[2]/div/div[3]/div[20]/div/ul/li[15]',
+        "Intrasoft Technologies ltd",
+    ),
 )
 
 
@@ -62,7 +68,7 @@ def check_section(driver, name, section_xpaths, nominee_xpath, nominee_name):
             EC.presence_of_element_located((By.XPATH, nominee_xpath))
         )
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", nominee)
-        if nominee_name in nominee.text:
+        if nominee_name.casefold() in nominee.text.casefold():
             log(f"{nominee_name} found.")
         else:
             log(f"{nominee_name} not found.")
