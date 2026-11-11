@@ -1,0 +1,5 @@
+# Copy this file to details.txt, then edit the values in Notepad.
+[TEST_RECORD]
+Name: Sample User
+Email: sample@example.com
+Phone: +254700000000
