@@ -1,5 +1,9 @@
-# Copy this file to details.txt, then edit the values in Notepad.
-[TEST_RECORD]
-Name: Sample User
-Email: sample@example.com
+# One [RECORD_ID] block per account. Each block needs Email and Phone.
+
+[TEST_RECORD_1]
+Email: sample1@example.com
 Phone: +254700000000
+
+[TEST_RECORD_2]
+Email: sample2@example.com
+Phone: +254711111111

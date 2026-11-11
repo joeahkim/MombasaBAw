@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import random
+import re
 import time
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-from details import load_details  # the second script, save as details.py
+from details import load_details  # the loader script, saved as details.py
 
 
 URL = "https://mombasabusinessawards.kenyachamber.co.ke/vote/"
@@ -26,7 +27,7 @@ URL = "https://mombasabusinessawards.kenyachamber.co.ke/vote/"
 # Each entry:
 #   (section name, section xpaths, nominee xpath, nominee name,
 #    vote button xpath, fill_details)
-# fill_details=True  -> fill email/phone from details.txt before submitting
+# fill_details=True  -> fill email/phone from the account before submitting
 # fill_details=False -> submit only; the page has stored the form details
 SECTIONS = (
     (
@@ -86,12 +87,9 @@ VOTE_FORM_XPATH = '//*[@id="vote-form"]'
 VOTE_FORM_ERROR_XPATH = '//*[@id="vote-form"]/div[2]/div[2]/div'
 VOTE_FORM_DISMISS_XPATH = '//*[@id="vote-form"]/div[1]/button'
 
-# How long to wait for the vote form to auto-close after submit before assuming failure.
 VOTE_FORM_DISAPPEAR_TIMEOUT = 10
-# How long to wait for the specific error div to appear after that.
 VOTE_FORM_ERROR_TIMEOUT = 5
 
-# Fallback XPaths checked for error text inside the form if the specific error div is empty/absent.
 ERROR_TEXT_XPATHS = (
     '//*[@id="vote-form"]//*[contains(@class, "error")]',
     '//*[@id="vote-form"]//*[contains(@class, "invalid")]',
@@ -101,23 +99,18 @@ ERROR_TEXT_XPATHS = (
 )
 
 # ---------------------------------------------------------------------------
-# Session + schedule persistence
+# Persistence layout
+#
+#   vote_state.json                 <- per-account schedule + history
+#   chrome_profiles/<safe_id>/      <- isolated browser profile per account
 # ---------------------------------------------------------------------------
 
-# Where the last-vote time and next-vote time are stored between runs.
 STATE_PATH = Path(__file__).with_name("vote_state.json")
+PROFILE_ROOT = Path(__file__).with_name("chrome_profiles")
 
-# Persistent Chrome profile so the site's stored form details / cookies /
-# localStorage survive between runs. This is what makes "the page stores the
-# form details" work across separate launches of this script.
-USER_DATA_DIR = Path(__file__).with_name("chrome_profile")
-
-# Required gap between votes: random in [2h03m, 2h15m].
-MIN_INTERVAL_SECONDS = 2 * 3600 + 3 * 60    # 7,380 s
-MAX_INTERVAL_SECONDS = 2 * 3600 + 15 * 60   # 8,100 s
-
-# Keep only the most recent N history entries in the state file.
-HISTORY_LIMIT = 20
+MIN_INTERVAL_SECONDS = 2 * 3600 + 3 * 60    # 2h03m
+MAX_INTERVAL_SECONDS = 2 * 3600 + 15 * 60   # 2h15m
+HISTORY_LIMIT = 50
 
 
 def _now():
@@ -144,106 +137,128 @@ def _parse_dt(value):
         return None
 
 
+def _profile_dir_for(account):
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", account["id"]) or "default"
+    return PROFILE_ROOT / safe
+
+
 def load_state():
-    """Return the persisted state dict, or {} if missing/unreadable."""
     if not STATE_PATH.exists():
-        return {}
+        return {"accounts": {}}
     try:
         data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         log(f"Could not read state file {STATE_PATH}: {error}. Starting fresh.")
-        return {}
+        return {"accounts": {}}
     if not isinstance(data, dict):
         log(f"State file {STATE_PATH} is not a JSON object. Starting fresh.")
-        return {}
+        return {"accounts": {}}
+    if not isinstance(data.get("accounts"), dict):
+        if any(k in data for k in ("last_vote_at", "next_vote_at", "interval_seconds")):
+            log(
+                f"Found legacy single-account state in {STATE_PATH}; "
+                "starting fresh with per-account state (old schedule not preserved)."
+            )
+        return {"accounts": {}}
     return data
 
 
 def save_state(state):
-    """Atomically write the state dict to STATE_PATH."""
     try:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = STATE_PATH.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+        tmp_path.write_text(
+            json.dumps(state, indent=2, sort_keys=True), encoding="utf-8"
+        )
         os.replace(tmp_path, STATE_PATH)
     except OSError as error:
         log(f"Could not write state file {STATE_PATH}: {error}")
 
 
 def pick_interval_seconds():
-    """Random vote interval in [2h03m, 2h15m]."""
     return random.randint(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)
 
 
-def record_vote(state, section, nominee):
-    """Append a successful vote to the state and schedule the next one."""
+def record_account_run(state, account, votes):
+    """Record one account run. votes = list of (section, nominee) tuples."""
+    if not votes:
+        return
+    key = account["id"]
     now = _now()
-    entry = {
-        "at": now.isoformat(timespec="seconds"),
-        "section": section,
-        "nominee": nominee,
-    }
-    history = state.setdefault("history", [])
+
+    accounts = state.setdefault("accounts", {})
+    if not isinstance(accounts, dict):
+        accounts = {}
+        state["accounts"] = accounts
+    entry = accounts.setdefault(key, {"history": []})
+    if not isinstance(entry, dict):
+        entry = {"history": []}
+        accounts[key] = entry
+
+    entry["record_id"] = account["id"]
+    entry["email"] = account["Email"]
+
+    history = entry.setdefault("history", [])
     if not isinstance(history, list):
         history = []
-        state["history"] = history
-    history.append(entry)
+        entry["history"] = history
+    for section, nominee in votes:
+        history.append(
+            {
+                "at": now.isoformat(timespec="seconds"),
+                "section": section,
+                "nominee": nominee,
+            }
+        )
     del history[:-HISTORY_LIMIT]
 
     interval = pick_interval_seconds()
-    state["last_vote_at"] = entry["at"]
-    state["last_vote_section"] = section
-    state["last_vote_nominee"] = nominee
-    state["interval_seconds"] = interval
-    state["next_vote_at"] = (now + timedelta(seconds=interval)).isoformat(timespec="seconds")
+    entry["last_vote_at"] = now.isoformat(timespec="seconds")
+    entry["last_vote_section"] = votes[-1][0]
+    entry["last_vote_nominee"] = votes[-1][1]
+    entry["interval_seconds"] = interval
+    entry["next_vote_at"] = (
+        now + timedelta(seconds=interval)
+    ).isoformat(timespec="seconds")
+
     save_state(state)
     log(
-        f"Recorded vote for {nominee} ({section}); "
-        f"next allowed at {state['next_vote_at']} (+{_format_delta(interval)})."
+        f"[{account['id']}] Recorded {len(votes)} vote(s); "
+        f"next at {entry['next_vote_at']} (+{_format_delta(interval)})."
     )
 
 
-def check_schedule(state, force=False):
-    """Return True if a vote is allowed now, else log why and return False."""
-    next_dt = _parse_dt(state.get("next_vote_at"))
+def account_due(state, account, force=False):
+    """Return (due, reason)."""
+    entry = state.get("accounts", {}).get(account["id"])
+    if not isinstance(entry, dict):
+        return True, "no previous vote recorded"
+    next_dt = _parse_dt(entry.get("next_vote_at"))
     if next_dt is None:
-        return True
-
+        return True, "no next_vote_at recorded"
     remaining = (next_dt - _now()).total_seconds()
     if remaining <= 0:
-        return True
-
+        return True, f"due (scheduled at {next_dt:%Y-%m-%d %H:%M:%S})"
     if force:
-        log(
-            f"Schedule says next vote at {next_dt:%Y-%m-%d %H:%M:%S} "
-            f"({_format_delta(remaining)} from now) — overriding with --force."
-        )
-        return True
-
-    log(
-        f"Not due yet. Last vote at {state.get('last_vote_at', '?')}, "
-        f"next at {next_dt:%Y-%m-%d %H:%M:%S} ({_format_delta(remaining)} from now). "
-        f"Use --force to override."
+        return True, f"forced (would be due at {next_dt:%Y-%m-%d %H:%M:%S})"
+    return (
+        False,
+        f"not due until {next_dt:%Y-%m-%d %H:%M:%S} "
+        f"({_format_delta(remaining)} from now)",
     )
-    return False
 
 
-# ---------------------------------------------------------------------------
-# Browser / page helpers
-# ---------------------------------------------------------------------------
-
-
-def build_driver():
-    """Launch Chrome with a persistent profile so session/form state survives."""
-    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+def build_driver(account):
+    """Launch Chrome with a per-account persistent profile."""
+    profile = _profile_dir_for(account)
+    profile.mkdir(parents=True, exist_ok=True)
     options = webdriver.ChromeOptions()
-    options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
+    options.add_argument(f"--user-data-dir={profile}")
     options.add_argument("--profile-directory=Default")
-    driver = webdriver.Chrome(
+    return webdriver.Chrome(
         service=ChromeService(ChromeDriverManager().install()),
         options=options,
     )
-    return driver
 
 
 def find_section(driver, name, section_xpaths):
@@ -295,7 +310,6 @@ def find_nominee(driver, nominee_xpath, nominee_name):
 
 
 def _collect_error_text(driver):
-    """Return any visible error text inside the vote form, or ''."""
     found = []
     for xpath in ERROR_TEXT_XPATHS:
         try:
@@ -315,19 +329,7 @@ def _collect_error_text(driver):
 
 
 def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
-    """Click Vote, optionally fill email/phone, submit, confirm form closes.
-
-    If ``details`` is provided, the email/phone fields are filled from it
-    (the CEO of The Year flow). If ``details`` is None, the fields are left
-    as-is because the page has already stored them from the previous vote,
-    and only Submit is clicked.
-
-    On success (form disappears on its own) returns True.
-    On failure (form still visible after submit) logs the error from
-    //*[@id="vote-form"]/div[2]/div[2]/div, clicks the dismiss button at
-    //*[@id="vote-form"]/div[1]/button, and returns False.
-    """
-    # 1) Click the nominee's Vote button.
+    """Click Vote, optionally fill email/phone, submit, confirm form closes."""
     try:
         vote_button = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, vote_button_xpath))
@@ -341,7 +343,6 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
         log(f"Vote button not clickable for {nominee_name}.")
         return False
 
-    # 2) Wait for the vote form and the submit button.
     try:
         WebDriverWait(driver, 10).until(
             EC.visibility_of_element_located((By.XPATH, VOTE_FORM_XPATH))
@@ -353,7 +354,6 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
         log("Vote form or submit button did not appear.")
         return False
 
-    # 3) Fill email/phone only when details were supplied (CEO of The Year).
     if details is not None:
         try:
             email_field = WebDriverWait(driver, 10).until(
@@ -365,7 +365,6 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
         except TimeoutException:
             log("Email/phone fields did not appear.")
             return False
-
         email_field.clear()
         email_field.send_keys(details["Email"])
         phone_field.clear()
@@ -374,7 +373,6 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
     else:
         log("Skipping field fill — using details stored on the page.")
 
-    # 4) Submit.
     try:
         submit_button.click()
         log("Clicked submit.")
@@ -382,7 +380,6 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
         log(f"Submit click failed: {error}")
         return False
 
-    # 5) Happy path: wait for the form to close on its own.
     try:
         WebDriverWait(driver, VOTE_FORM_DISAPPEAR_TIMEOUT).until(
             EC.invisibility_of_element_located((By.XPATH, VOTE_FORM_XPATH))
@@ -390,9 +387,11 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
         log(f"Vote form closed for {nominee_name} — vote accepted.")
         return True
     except TimeoutException:
-        log(f"Vote form still visible after submit for {nominee_name} — checking for error.")
+        log(
+            f"Vote form still visible after submit for {nominee_name} — "
+            "checking for error."
+        )
 
-    # 6) Error path: the form didn't close. Inspect the specific error div.
     error_text = ""
     try:
         error_div = WebDriverWait(driver, VOTE_FORM_ERROR_TIMEOUT).until(
@@ -404,7 +403,6 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
             .split()
         )
     except TimeoutException:
-        # Fall back to generic probes so we still log *something*.
         error_text = _collect_error_text(driver)
 
     if error_text:
@@ -412,7 +410,6 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
     else:
         log(f"Vote form still visible for {nominee_name} but no error text found.")
 
-    # 7) Dismiss the form so the page is usable for the next section.
     try:
         dismiss_button = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, VOTE_FORM_DISMISS_XPATH))
@@ -422,7 +419,6 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
         )
         dismiss_button.click()
         log("Clicked dismiss button on the vote form.")
-        # Best-effort confirmation the form actually closed.
         try:
             WebDriverWait(driver, 5).until(
                 EC.invisibility_of_element_located((By.XPATH, VOTE_FORM_XPATH))
@@ -436,59 +432,17 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
     return False
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="Mombasa Business Awards voter")
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Ignore the 2h03m–2h15m schedule gate and vote now.",
-    )
-    parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Print the stored schedule/state and exit.",
-    )
-    args = parser.parse_args(argv)
-
-    state = load_state()
-
-    if args.status:
-        if not state:
-            print(json.dumps({"status": "no state file yet", "path": str(STATE_PATH)}, indent=2))
-            return 0
-        next_dt = _parse_dt(state.get("next_vote_at"))
-        payload = dict(state)
-        payload["state_path"] = str(STATE_PATH)
-        payload["user_data_dir"] = str(USER_DATA_DIR)
-        if next_dt is not None:
-            remaining = (next_dt - _now()).total_seconds()
-            payload["seconds_until_next_vote"] = int(max(0, remaining))
-            payload["next_vote_due"] = remaining <= 0
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-
-    if not check_schedule(state, force=args.force):
-        return 2
-
-    details = load_details()  # raises on invalid/missing details.txt
-    log(f"Loaded details for record {details['id']!r}.")
-    log(f"State file: {STATE_PATH}")
-    log(f"Chrome profile: {USER_DATA_DIR}")
-
+def vote_account(account, state, pause=False):
+    """Run the full vote flow for one account. Returns (successes, attempted)."""
+    log(f"[{account['id']}] Starting vote run for {account['Email']}")
     driver = None
+    successes = []
     attempted = 0
-    succeeded = 0
     try:
-        driver = build_driver()
+        driver = build_driver(account)
         driver.maximize_window()
-        log(f"Opening {URL}")
+        log(f"[{account['id']}] Opening {URL}")
         driver.get(URL)
-
         WebDriverWait(driver, 20).until(
             lambda browser: browser.execute_script("return document.readyState")
             == "complete"
@@ -508,38 +462,141 @@ def main(argv=None):
                 continue
             if not vote_xpath:
                 continue
+
             attempted += 1
             voted = cast_vote(
                 driver,
                 nominee_name,
                 vote_xpath,
-                details if fill_details else None,
+                account if fill_details else None,
             )
             if not voted:
-                # Change this to `break` if you want to stop on first failure.
-                log(f"Skipping pause for {name}; moving to next section.")
+                log(f"[{account['id']}] Skipping pause for {name}.")
                 continue
-            succeeded += 1
-            record_vote(state, name, nominee_name)
-            time.sleep(2)  # brief pause before next section, per spec
+            successes.append((name, nominee_name))
+            time.sleep(2)
 
+        if successes:
+            record_account_run(state, account, successes)
     except TimeoutException as error:
-        log(f"Timed out while waiting for the page to load: {error}")
+        log(f"[{account['id']}] Timed out: {error}")
     except WebDriverException as error:
-        log(f"Browser or page error: {error}")
+        log(f"[{account['id']}] Browser error: {error}")
     except KeyboardInterrupt:
-        log("Stopped by user.")
+        log(f"[{account['id']}] Stopped by user.")
+        raise
     finally:
         if driver is not None:
+            if pause:
+                try:
+                    input(f"[{account['id']}] Press Enter to close the browser...")
+                except (EOFError, KeyboardInterrupt):
+                    pass
             try:
-                input("Press Enter to close the browser...")
-            except (EOFError, KeyboardInterrupt):
-                pass
-            driver.quit()
-            log("Browser closed.")
+                driver.quit()
+                log(f"[{account['id']}] Browser closed.")
+            except WebDriverException as error:
+                log(f"[{account['id']}] Error closing browser: {error}")
+    log(f"[{account['id']}] Run complete: {len(successes)}/{attempted} votes accepted.")
+    return successes, attempted
 
-    log(f"Run complete: {succeeded}/{attempted} votes accepted.")
-    if attempted and not succeeded:
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Mombasa Business Awards voter (multi-account)"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignore each account's schedule gate and vote now.",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print per-account schedule state and exit (no browser launched).",
+    )
+    parser.add_argument(
+        "--account",
+        default=None,
+        help="Only process this record ID (e.g. TEST_RECORD_1).",
+    )
+    parser.add_argument(
+        "--pause",
+        action="store_true",
+        help="Prompt before closing each account's browser (debugging).",
+    )
+    args = parser.parse_args(argv)
+
+    state = load_state()
+
+    try:
+        accounts = load_details()
+    except (FileNotFoundError, ValueError) as error:
+        log(f"Could not load details.txt: {error}")
+        return 4
+
+    if args.account:
+        accounts = [a for a in accounts if a["id"] == args.account]
+        if not accounts:
+            log(f"Account {args.account!r} not found in details.txt.")
+            return 3
+
+    if args.status:
+        payload = {
+            "state_path": str(STATE_PATH),
+            "profile_root": str(PROFILE_ROOT),
+            "accounts": {},
+        }
+        for account in accounts:
+            due, reason = account_due(state, account, force=False)
+            entry = state.get("accounts", {}).get(account["id"], {})
+            history = entry.get("history") if isinstance(entry, dict) else None
+            payload["accounts"][account["id"]] = {
+                "email": account["Email"],
+                "due": due,
+                "reason": reason,
+                "last_vote_at": entry.get("last_vote_at") if isinstance(entry, dict) else None,
+                "last_vote_section": entry.get("last_vote_section") if isinstance(entry, dict) else None,
+                "last_vote_nominee": entry.get("last_vote_nominee") if isinstance(entry, dict) else None,
+                "interval_seconds": entry.get("interval_seconds") if isinstance(entry, dict) else None,
+                "next_vote_at": entry.get("next_vote_at") if isinstance(entry, dict) else None,
+                "history_count": len(history) if isinstance(history, list) else 0,
+            }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    due_accounts = []
+    for account in accounts:
+        due, reason = account_due(state, account, force=args.force)
+        log(f"[{account['id']}] {reason}")
+        if due:
+            due_accounts.append(account)
+
+    if not due_accounts:
+        log("No accounts are due. Use --force to override or --status to inspect.")
+        return 0
+
+    log(
+        "Processing "
+        f"{len(due_accounts)} account(s): {[a['id'] for a in due_accounts]}"
+    )
+
+    overall_attempted = 0
+    overall_succeeded = 0
+    try:
+        for account in due_accounts:
+            successes, attempted = vote_account(account, state, pause=args.pause)
+            overall_attempted += attempted
+            overall_succeeded += len(successes)
+    except KeyboardInterrupt:
+        log("Stopped by user.")
+        return 130
+
+    log(
+        f"All done. Accounts processed: {len(due_accounts)}; "
+        f"votes: {overall_succeeded}/{overall_attempted}."
+    )
+    if overall_attempted and not overall_succeeded:
         return 1
     return 0
 
