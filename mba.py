@@ -19,16 +19,11 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-from details import load_details  # the loader script, saved as details.py
+from details import load_details
 
 
 URL = "https://mombasabusinessawards.kenyachamber.co.ke/vote/"
 
-# Each entry:
-#   (section name, section xpaths, nominee xpath, nominee name,
-#    vote button xpath, fill_details)
-# fill_details=True  -> fill email/phone from the account before submitting
-# fill_details=False -> submit only; the page has stored the form details
 SECTIONS = (
     (
         "CEO of The Year",
@@ -84,13 +79,14 @@ VOTE_EMAIL_XPATH = '//*[@id="vote-email"]'
 VOTE_PHONE_XPATH = '//*[@id="vote-phone"]'
 VOTE_SUBMIT_XPATH = '//*[@id="vote-submit"]'
 VOTE_FORM_XPATH = '//*[@id="vote-form"]'
-VOTE_FORM_ERROR_XPATH = '//*[@id="vote-form"]/div[2]/div[2]/div'
 VOTE_FORM_DISMISS_XPATH = '//*[@id="vote-form"]/div[1]/button'
 
 VOTE_FORM_DISAPPEAR_TIMEOUT = 10
 VOTE_FORM_ERROR_TIMEOUT = 5
 
 ERROR_TEXT_XPATHS = (
+    '//*[@id="vote-form-error"]',
+    '//*[@id="vote-form"]/div[2]/div[2]/div',
     '//*[@id="vote-form"]//*[contains(@class, "error")]',
     '//*[@id="vote-form"]//*[contains(@class, "invalid")]',
     '//*[@id="vote-form"]//*[@role="alert"]',
@@ -98,19 +94,34 @@ ERROR_TEXT_XPATHS = (
     '//*[@id="vote-form"]//*[contains(@class, "message")]',
 )
 
-# ---------------------------------------------------------------------------
-# Persistence layout
-#
-#   vote_state.json                 <- per-account schedule + history
-#   chrome_profiles/<safe_id>/      <- isolated browser profile per account
-# ---------------------------------------------------------------------------
-
 STATE_PATH = Path(__file__).with_name("vote_state.json")
 PROFILE_ROOT = Path(__file__).with_name("chrome_profiles")
 
 MIN_INTERVAL_SECONDS = 2 * 3600 + 3 * 60    # 2h03m
 MAX_INTERVAL_SECONDS = 2 * 3600 + 15 * 60   # 2h15m
 HISTORY_LIMIT = 50
+
+TIME_LOCK_BUFFER_SECONDS = 60
+
+# How often the daemon wakes up while waiting for the next due time.
+# Small enough to pick up edits to details.txt / vote_state.json quickly,
+# large enough not to burn CPU.
+DEFAULT_POLL_SECONDS = 300   # 5 min
+
+# Minimum cooldown after a pass so that transient failures (no time-lock)
+# don't cause a tight retry loop.
+MIN_COOLDOWN_SECONDS = 300   # 5 min
+
+
+class VoteTimeLock(Exception):
+    """Raised when the vote form returns a time-lock error."""
+
+    def __init__(self, wait_until, message):
+        self.wait_until = wait_until
+        self.message = message
+        super().__init__(
+            f"Time-lock until {wait_until:%Y-%m-%d %H:%M:%S}: {message}"
+        )
 
 
 def _now():
@@ -157,7 +168,7 @@ def load_state():
         if any(k in data for k in ("last_vote_at", "next_vote_at", "interval_seconds")):
             log(
                 f"Found legacy single-account state in {STATE_PATH}; "
-                "starting fresh with per-account state (old schedule not preserved)."
+                "starting fresh with per-account state."
             )
         return {"accounts": {}}
     return data
@@ -180,7 +191,6 @@ def pick_interval_seconds():
 
 
 def record_account_run(state, account, votes):
-    """Record one account run. votes = list of (section, nominee) tuples."""
     if not votes:
         return
     key = account["id"]
@@ -220,6 +230,8 @@ def record_account_run(state, account, votes):
     entry["next_vote_at"] = (
         now + timedelta(seconds=interval)
     ).isoformat(timespec="seconds")
+    entry.pop("time_lock_message", None)
+    entry.pop("time_lock_at", None)
 
     save_state(state)
     log(
@@ -228,8 +240,36 @@ def record_account_run(state, account, votes):
     )
 
 
+def record_time_lock(state, account, successes, wait_until, message):
+    if successes:
+        record_account_run(state, account, successes)
+
+    key = account["id"]
+    accounts = state.setdefault("accounts", {})
+    if not isinstance(accounts, dict):
+        accounts = {}
+        state["accounts"] = accounts
+    entry = accounts.setdefault(key, {"history": []})
+    if not isinstance(entry, dict):
+        entry = {"history": []}
+        accounts[key] = entry
+
+    entry["record_id"] = account["id"]
+    entry["email"] = account["Email"]
+    effective = wait_until + timedelta(seconds=TIME_LOCK_BUFFER_SECONDS)
+    entry["next_vote_at"] = effective.isoformat(timespec="seconds")
+    entry["time_lock_message"] = message
+    entry["time_lock_at"] = _now().isoformat(timespec="seconds")
+
+    save_state(state)
+    log(
+        f"[{account['id']}] Time-lock saved. "
+        f"Next vote at {entry['next_vote_at']} "
+        f"(+{TIME_LOCK_BUFFER_SECONDS}s buffer)."
+    )
+
+
 def account_due(state, account, force=False):
-    """Return (due, reason)."""
     entry = state.get("accounts", {}).get(account["id"])
     if not isinstance(entry, dict):
         return True, "no previous vote recorded"
@@ -241,15 +281,41 @@ def account_due(state, account, force=False):
         return True, f"due (scheduled at {next_dt:%Y-%m-%d %H:%M:%S})"
     if force:
         return True, f"forced (would be due at {next_dt:%Y-%m-%d %H:%M:%S})"
+    suffix = ""
+    if entry.get("time_lock_message"):
+        suffix = f" [time-locked: {entry['time_lock_message']!r}]"
     return (
         False,
         f"not due until {next_dt:%Y-%m-%d %H:%M:%S} "
-        f"({_format_delta(remaining)} from now)",
+        f"({_format_delta(remaining)} from now){suffix}",
     )
 
 
+def compute_next_wake(state, accounts, max_sleep):
+    """Return (sleep_seconds, next_due_dt_or_None).
+
+    - If any account is due now → (0, None).
+    - Else → (min(time_until_earliest, max_sleep), earliest_dt).
+    - If no account has a schedule (edge case) → (max_sleep, None).
+    """
+    now = _now()
+    earliest = None
+    for account in accounts:
+        entry = state.get("accounts", {}).get(account["id"])
+        next_dt = _parse_dt(entry.get("next_vote_at")) if isinstance(entry, dict) else None
+        if next_dt is None:
+            return 0, None
+        if next_dt <= now:
+            return 0, None
+        if earliest is None or next_dt < earliest:
+            earliest = next_dt
+    if earliest is None:
+        return max_sleep, None
+    delta = (earliest - now).total_seconds()
+    return min(delta, max_sleep), earliest
+
+
 def build_driver(account):
-    """Launch Chrome with a per-account persistent profile."""
     profile = _profile_dir_for(account)
     profile.mkdir(parents=True, exist_ok=True)
     options = webdriver.ChromeOptions()
@@ -328,8 +394,50 @@ def _collect_error_text(driver):
     return " | ".join(found)
 
 
+def _parse_time_from_message(message):
+    if not message:
+        return None
+
+    now = _now()
+
+    match = re.search(r"(\d{1,2}):(\d{2})\s*([AaPp]\.?[Mm]\.?)?", message)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        ampm = match.group(3)
+    else:
+        match = re.search(r"(\d{1,2})\s*([AaPp]\.?[Mm]\.?)", message)
+        if match:
+            hour = int(match.group(1))
+            minute = 0
+            ampm = match.group(2)
+        else:
+            match = re.search(r"(\d+)\s+hours?", message)
+            if match:
+                return now + timedelta(hours=int(match.group(1)))
+            return None
+
+    if ampm:
+        ampm_clean = ampm.replace(".", "").upper()
+        if ampm_clean == "PM" and hour < 12:
+            hour += 12
+        elif ampm_clean == "AM" and hour == 12:
+            hour = 0
+
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now:
+        if (now - candidate).total_seconds() <= 60:
+            candidate = now + timedelta(seconds=MIN_INTERVAL_SECONDS)
+        else:
+            candidate += timedelta(days=1)
+
+    return candidate
+
+
 def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
-    """Click Vote, optionally fill email/phone, submit, confirm form closes."""
     try:
         vote_button = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, vote_button_xpath))
@@ -394,13 +502,8 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
 
     error_text = ""
     try:
-        error_div = WebDriverWait(driver, VOTE_FORM_ERROR_TIMEOUT).until(
-            EC.presence_of_element_located((By.XPATH, VOTE_FORM_ERROR_XPATH))
-        )
-        error_text = " ".join(
-            (error_div.get_attribute("textContent") or error_div.text)
-            .replace("\xa0", " ")
-            .split()
+        error_text = WebDriverWait(driver, VOTE_FORM_ERROR_TIMEOUT).until(
+            lambda browser: _collect_error_text(browser) or False
         )
     except TimeoutException:
         error_text = _collect_error_text(driver)
@@ -409,6 +512,14 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
         log(f"Vote error for {nominee_name}: {error_text!r}")
     else:
         log(f"Vote form still visible for {nominee_name} but no error text found.")
+
+    wait_until = _parse_time_from_message(error_text)
+    if wait_until is not None:
+        log(
+            f"Detected time-lock until {wait_until:%Y-%m-%d %H:%M:%S} — "
+            "aborting account run (browser will close)."
+        )
+        raise VoteTimeLock(wait_until, error_text)
 
     try:
         dismiss_button = WebDriverWait(driver, 10).until(
@@ -433,11 +544,11 @@ def cast_vote(driver, nominee_name, vote_button_xpath, details=None):
 
 
 def vote_account(account, state, pause=False):
-    """Run the full vote flow for one account. Returns (successes, attempted)."""
     log(f"[{account['id']}] Starting vote run for {account['Email']}")
     driver = None
     successes = []
     attempted = 0
+    time_locked = False
     try:
         driver = build_driver(account)
         driver.maximize_window()
@@ -464,20 +575,34 @@ def vote_account(account, state, pause=False):
                 continue
 
             attempted += 1
-            voted = cast_vote(
-                driver,
-                nominee_name,
-                vote_xpath,
-                account if fill_details else None,
-            )
+            try:
+                voted = cast_vote(
+                    driver,
+                    nominee_name,
+                    vote_xpath,
+                    account if fill_details else None,
+                )
+            except VoteTimeLock as tlock:
+                log(f"[{account['id']}] Vote time-lock: {tlock.message!r}")
+                log(
+                    f"[{account['id']}] Locked until "
+                    f"{tlock.wait_until:%Y-%m-%d %H:%M:%S}."
+                )
+                record_time_lock(
+                    state, account, successes, tlock.wait_until, tlock.message
+                )
+                time_locked = True
+                break
+
             if not voted:
                 log(f"[{account['id']}] Skipping pause for {name}.")
                 continue
             successes.append((name, nominee_name))
             time.sleep(2)
 
-        if successes:
+        if successes and not time_locked:
             record_account_run(state, account, successes)
+
     except TimeoutException as error:
         log(f"[{account['id']}] Timed out: {error}")
     except WebDriverException as error:
@@ -497,18 +622,155 @@ def vote_account(account, state, pause=False):
                 log(f"[{account['id']}] Browser closed.")
             except WebDriverException as error:
                 log(f"[{account['id']}] Error closing browser: {error}")
-    log(f"[{account['id']}] Run complete: {len(successes)}/{attempted} votes accepted.")
-    return successes, attempted
+
+    log(
+        f"[{account['id']}] Run complete: {len(successes)}/{attempted} votes "
+        f"accepted{'; time-locked' if time_locked else ''}."
+    )
+    return successes, attempted, time_locked
+
+
+# ---------------------------------------------------------------------------
+# One pass / daemon loop
+# ---------------------------------------------------------------------------
+
+
+def run_pass(accounts, state, force=False, pause=False):
+    """Vote every due account once. Returns (attempted, succeeded, time_locked)."""
+    due_accounts = [a for a in accounts if account_due(state, a, force=force)[0]]
+
+    if not due_accounts:
+        return 0, 0, []
+
+    log(
+        f"Processing {len(due_accounts)} due account(s): "
+        f"{[a['id'] for a in due_accounts]}"
+    )
+
+    attempted = 0
+    succeeded = 0
+    time_locked = []
+    for account in due_accounts:
+        successes, att, tl = vote_account(account, state, pause=pause)
+        attempted += att
+        succeeded += len(successes)
+        if tl:
+            time_locked.append(account["id"])
+    return attempted, succeeded, time_locked
+
+
+def _load_accounts_or_retry(account_filter, poll):
+    """Load accounts, or return None after sleeping if not available."""
+    try:
+        accounts = load_details()
+    except (FileNotFoundError, ValueError) as error:
+        log(f"Could not load details.txt: {error}. Retrying in {poll}s.")
+        return None
+
+    if account_filter:
+        accounts = [a for a in accounts if a["id"] == account_filter]
+        if not accounts:
+            log(f"Account {account_filter!r} not found in details.txt. Retrying in {poll}s.")
+            return None
+
+    return accounts
+
+
+def run_once(accounts, force=False, pause=False):
+    """One-shot mode: single pass, then exit."""
+    state = load_state()
+    attempted, succeeded, time_locked = run_pass(
+        accounts, state, force=force, pause=pause
+    )
+    log(
+        f"Done. Votes: {succeeded}/{attempted}; "
+        f"time-locked: {time_locked or 'none'}."
+    )
+    if attempted and not succeeded and not time_locked:
+        return 1
+    return 0
+
+
+def run_forever(force=False, pause=False, account_filter=None, poll=DEFAULT_POLL_SECONDS):
+    """Daemon loop: process due accounts, sleep until the next is due."""
+    log("=" * 60)
+    log("Daemon mode started. Press Ctrl+C to stop.")
+    log("=" * 60)
+
+    force_next_pass = force
+    last_logged_target = None
+    first_iteration = True
+
+    while True:
+        accounts = _load_accounts_or_retry(account_filter, poll)
+        if accounts is None:
+            try:
+                time.sleep(poll)
+            except KeyboardInterrupt:
+                log("Stopped by user.")
+                return 130
+            continue
+
+        state = load_state()
+
+        if first_iteration:
+            log(f"Loaded {len(accounts)} account(s):")
+            for account in accounts:
+                due, reason = account_due(state, account, force=False)
+                log(f"  [{account['id']}] {reason}")
+            first_iteration = False
+
+        attempted, succeeded, time_locked = run_pass(
+            accounts, state, force=force_next_pass, pause=pause
+        )
+        if attempted:
+            log(
+                f"Pass complete: {succeeded}/{attempted} votes; "
+                f"time-locked: {time_locked or 'none'}."
+            )
+        force_next_pass = False  # --force only applies to the first pass
+
+        # Decide how long to sleep before the next check.
+        sleep_seconds, next_due = compute_next_wake(
+            state, accounts, max_sleep=poll
+        )
+        if sleep_seconds <= 0:
+            # Something is still due after the pass (e.g. transient failure
+            # without a time-lock). Enforce a cooldown to avoid tight loop.
+            sleep_seconds = MIN_COOLDOWN_SECONDS
+
+        if next_due is not None:
+            target_str = next_due.strftime("%Y-%m-%d %H:%M")
+            if target_str != last_logged_target:
+                log(
+                    f"Next due at {next_due:%Y-%m-%d %H:%M:%S} "
+                    f"({_format_delta((next_due - _now()).total_seconds())} from now). "
+                    f"Sleeping up to {_format_delta(sleep_seconds)} per poll."
+                )
+                last_logged_target = target_str
+        else:
+            last_logged_target = None
+
+        try:
+            time.sleep(sleep_seconds)
+        except KeyboardInterrupt:
+            log("Stopped by user.")
+            return 130
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Mombasa Business Awards voter (multi-account)"
+        description="Mombasa Business Awards voter (multi-account, daemon)"
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single pass and exit (old behaviour). Default is daemon mode.",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Ignore each account's schedule gate and vote now.",
+        help="Ignore each account's schedule gate. In daemon mode, applies only to the first pass.",
     )
     parser.add_argument(
         "--status",
@@ -525,23 +787,28 @@ def main(argv=None):
         action="store_true",
         help="Prompt before closing each account's browser (debugging).",
     )
+    parser.add_argument(
+        "--poll",
+        type=int,
+        default=DEFAULT_POLL_SECONDS,
+        help=f"Poll interval in seconds while idle (default {DEFAULT_POLL_SECONDS}).",
+    )
     args = parser.parse_args(argv)
 
-    state = load_state()
-
-    try:
-        accounts = load_details()
-    except (FileNotFoundError, ValueError) as error:
-        log(f"Could not load details.txt: {error}")
-        return 4
-
-    if args.account:
-        accounts = [a for a in accounts if a["id"] == args.account]
-        if not accounts:
-            log(f"Account {args.account!r} not found in details.txt.")
-            return 3
-
+    # ---- status mode ----
     if args.status:
+        state = load_state()
+        try:
+            accounts = load_details()
+        except (FileNotFoundError, ValueError) as error:
+            log(f"Could not load details.txt: {error}")
+            return 4
+        if args.account:
+            accounts = [a for a in accounts if a["id"] == args.account]
+            if not accounts:
+                log(f"Account {args.account!r} not found.")
+                return 3
+
         payload = {
             "state_path": str(STATE_PATH),
             "profile_root": str(PROFILE_ROOT),
@@ -556,49 +823,37 @@ def main(argv=None):
                 "due": due,
                 "reason": reason,
                 "last_vote_at": entry.get("last_vote_at") if isinstance(entry, dict) else None,
-                "last_vote_section": entry.get("last_vote_section") if isinstance(entry, dict) else None,
-                "last_vote_nominee": entry.get("last_vote_nominee") if isinstance(entry, dict) else None,
                 "interval_seconds": entry.get("interval_seconds") if isinstance(entry, dict) else None,
                 "next_vote_at": entry.get("next_vote_at") if isinstance(entry, dict) else None,
+                "time_lock_message": entry.get("time_lock_message") if isinstance(entry, dict) else None,
+                "time_lock_at": entry.get("time_lock_at") if isinstance(entry, dict) else None,
                 "history_count": len(history) if isinstance(history, list) else 0,
             }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
 
-    due_accounts = []
-    for account in accounts:
-        due, reason = account_due(state, account, force=args.force)
-        log(f"[{account['id']}] {reason}")
-        if due:
-            due_accounts.append(account)
-
-    if not due_accounts:
-        log("No accounts are due. Use --force to override or --status to inspect.")
-        return 0
-
-    log(
-        "Processing "
-        f"{len(due_accounts)} account(s): {[a['id'] for a in due_accounts]}"
-    )
-
-    overall_attempted = 0
-    overall_succeeded = 0
+    # ---- load accounts once for the initial validation ----
     try:
-        for account in due_accounts:
-            successes, attempted = vote_account(account, state, pause=args.pause)
-            overall_attempted += attempted
-            overall_succeeded += len(successes)
-    except KeyboardInterrupt:
-        log("Stopped by user.")
-        return 130
+        accounts = load_details()
+    except (FileNotFoundError, ValueError) as error:
+        log(f"Could not load details.txt: {error}")
+        return 4
 
-    log(
-        f"All done. Accounts processed: {len(due_accounts)}; "
-        f"votes: {overall_succeeded}/{overall_attempted}."
+    if args.account:
+        accounts = [a for a in accounts if a["id"] == args.account]
+        if not accounts:
+            log(f"Account {args.account!r} not found in details.txt.")
+            return 3
+
+    # ---- one-shot or daemon ----
+    if args.once:
+        return run_once(accounts, force=args.force, pause=args.pause)
+    return run_forever(
+        force=args.force,
+        pause=args.pause,
+        account_filter=args.account,
+        poll=args.poll,
     )
-    if overall_attempted and not overall_succeeded:
-        return 1
-    return 0
 
 
 if __name__ == "__main__":
