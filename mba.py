@@ -320,6 +320,7 @@ def build_driver(account):
     profile.mkdir(parents=True, exist_ok=True)
 
     options = webdriver.ChromeOptions()
+    # options.add_argument("--headless=new")
     # Existing: per-account persistent profile so stored form details survive.
     options.add_argument(f"--user-data-dir={profile}")
     options.add_argument("--profile-directory=Default")
